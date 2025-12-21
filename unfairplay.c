@@ -9,6 +9,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <mach-o/loader.h>
+#include <mach-o/fat.h>
+
+#define SWAP32(x) (((x & 0xff000000) >> 24) | ((x & 0x00ff0000) >> 8) | ((x & 0x0000ff00) << 8) | ((x & 0x000000ff) << 24))
 
 extern int mremap_encrypted(void*, size_t, uint32_t, uint32_t, uint32_t);
 
@@ -56,8 +59,8 @@ int copy(const char* src, const char* dest) {
     return result;
 }
 
-static int unprotect(int f, uint8_t *dupe, struct encryption_info_command_64 *info) {
-    void *base = mmap(NULL, info->cryptsize, PROT_READ | PROT_EXEC, MAP_PRIVATE, f, info->cryptoff);
+static int unprotect(int f, uint64_t fileoff, uint8_t *dupe, struct encryption_info_command_64 *info) {
+    void *base = mmap(NULL, info->cryptsize, PROT_READ | PROT_EXEC, MAP_PRIVATE, f, fileoff + info->cryptoff);
     if (base == MAP_FAILED) {
         perror("mmap");
         return 1;
@@ -143,6 +146,39 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    uint8_t *real_base = base;
+    size_t real_base_size = base_size;
+    uint8_t *real_dupe = dupe;
+    size_t real_dupe_size = dupe_size;
+
+    uint64_t fileoff = 0;
+    if(*(uint32_t*)base == FAT_CIGAM)
+    {
+        struct fat_header *fh = (struct fat_header*)base;
+        struct fat_arch *arch = (struct fat_arch*)(fh + 1);
+        for(size_t i = 0; i < SWAP32(fh->nfat_arch); ++i)
+        {
+            if(SWAP32(arch[i].cputype) == CPU_TYPE_ARM64 && SWAP32(arch[i].cpusubtype) == CPU_SUBTYPE_ARM64_ALL)
+            {
+                uint32_t offset = SWAP32(arch[i].offset);
+                uint32_t size = SWAP32(arch[i].size);
+                assert(offset < base_size);
+                assert(size <= base_size - offset);
+                base += offset;
+                dupe += offset;
+                base_size = size;
+                dupe_size = size;
+                fileoff = offset;
+                break;
+            }
+        }
+        if(!fileoff)
+        {
+            printf("Failed to find arm64 slice.\n");
+            return 1;
+        }
+    }
+
     struct mach_header_64* header = (struct mach_header_64*) base;
     assert(header->magic == MH_MAGIC_64);
     assert(header->cputype == CPU_TYPE_ARM64);
@@ -162,7 +198,7 @@ int main(int argc, char* argv[]) {
             // If "unprotect"'ing is successful, then change the "cryptid" so that
             // the loader does not attempt to decrypt decrypted pages.
             //
-            if (unprotect(f, dupe, encryption_info) == 0) {
+            if (unprotect(f, fileoff, dupe, encryption_info) == 0) {
                 encryption_info = (struct encryption_info_command_64*) (dupe + offset);
                 encryption_info->cryptid = 0;
             }
@@ -175,8 +211,8 @@ int main(int argc, char* argv[]) {
         offset += command->cmdsize;
     }
 
-    munmap(base, base_size);
-    munmap(dupe, dupe_size);
+    munmap(real_base, real_base_size);
+    munmap(real_dupe, real_dupe_size);
 
     printf("Succeeded in decrypting the binary.\n");
 
