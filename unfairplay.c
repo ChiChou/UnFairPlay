@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/clonefile.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -14,50 +15,6 @@
 #define SWAP32(x) (((x & 0xff000000) >> 24) | ((x & 0x00ff0000) >> 8) | ((x & 0x0000ff00) << 8) | ((x & 0x000000ff) << 24))
 
 extern int mremap_encrypted(void*, size_t, uint32_t, uint32_t, uint32_t);
-
-int copy(const char* src, const char* dest) {
-    if (strcmp(src, dest) == 0) {
-        return 1;
-    }
-
-    int result = 0;
-    FILE* src_fp = fopen(src, "rb");
-    FILE* dest_fp = fopen(dest, "wb");
-    if (src_fp == NULL || dest_fp == NULL) {
-        result = 1;
-    }
-
-    if (result != 1) {
-        while (1) {
-            char c;
-            if (fread(&c, sizeof(c), 1, src_fp) < 1) {
-                if (feof(src_fp)) {
-                    break;
-                } else {
-                    result = 1;
-                    break;
-                }
-            }
-            if (fwrite(&c, sizeof(c), 1, dest_fp) < 1) {
-                result = 1;
-                break;
-            }
-        }
-    }
-
-    if (dest_fp != NULL) {
-        if (fclose(dest_fp) == EOF) {
-            result = 1;
-        }
-    }
-    if (src_fp != NULL) {
-        if (fclose(src_fp) == EOF) {
-            result = 1;
-        }
-    }
-
-    return result;
-}
 
 static int unprotect(int f, uint64_t fileoff, uint8_t *dupe, struct encryption_info_command_64 *info) {
     void *base = mmap(NULL, info->cryptsize, PROT_READ | PROT_EXEC, MAP_PRIVATE, f, fileoff + info->cryptoff);
@@ -125,8 +82,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (copy(argv[1], argv[2]) == 1) {
-        perror("copy");
+    if (clonefile(argv[1], argv[2], 0) == 0) {
+        perror("clonefile");
         return 1;
     }
 
